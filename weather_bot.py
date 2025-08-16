@@ -1,12 +1,13 @@
-# weather_bot.py — UOC Weather Bot (immediate post + loop)
+# weather_bot.py — UOC Weather Bot (grouped, readable format)
 import os
 import sys
 import asyncio
 import datetime as dt
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, OrderedDict
 import aiohttp
 import discord
 from discord.ext import tasks, commands
+from collections import OrderedDict as OD
 
 # ===== ENV =====
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -83,6 +84,43 @@ REGIONS: Dict[str, Tuple[float, float]] = {
     "Caineville Factory Butte":       (38.3750, -110.8820),
 }
 
+# Group headers → ordered list of region names
+GROUPS: "OrderedDict[str, List[str]]" = OD([
+    ("Wasatch Front & Canyons", [
+        "Salt Lake City (Wasatch Front)", "Bountiful/Layton", "Ogden", "Logan/Cache Valley",
+        "Park City", "Heber/Midway", "Alta/Snowbird (LCC)", "Brighton/Solitude (BCC)",
+        "Powder Mountain", "Snowbasin"
+    ]),
+    ("Utah County & Central Wasatch", [
+        "Provo/Orem", "Spanish Fork/Nephi"
+    ]),
+    ("West Desert & Salt Flats", [
+        "Tooele/Grantsville", "Bonneville Salt Flats (Wendover)"
+    ]),
+    ("Uintas & NE Utah", [
+        "Mirror Lake Hwy (Uintas)", "Vernal/Uintah Basin", "Roosevelt/Duchesne", "Bear Lake (Garden City)"
+    ]),
+    ("Central Utah & Castle Country", [
+        "Price/Helper", "Emery/Green River", "Hanksville"
+    ]),
+    ("Canyon Country & SE Utah", [
+        "Moab", "Arches National Park", "Canyonlands (Island in the Sky)",
+        "Monticello/Blanding", "Bluff/Monument Valley (UT side)"
+    ]),
+    ("Capitol Reef / Boulder / Escalante", [
+        "Torrey/Capitol Reef", "Boulder Mountain (Aquarius)", "Escalante"
+    ]),
+    ("Bryce / Panguitch / Cedar Mtn", [
+        "Bryce Canyon", "Panguitch", "Duck Creek/Cedar Mtn"
+    ]),
+    ("SW Utah & Zion", [
+        "Cedar City", "Zion (Springdale)", "Hurricane/La Verkin", "St. George/Washington", "Kanab", "Big Water/Lake Powell (UT)"
+    ]),
+    ("San Rafael Swell & Remote", [
+        "Goblin Valley", "San Rafael Swell (Temple Mtn)", "Caineville Factory Butte"
+    ]),
+])
+
 # ===== DISCORD =====
 intents = discord.Intents.default()
 intents.guilds = True
@@ -126,60 +164,74 @@ async def fetch_ut_alerts(session: aiohttp.ClientSession) -> List[str]:
         headline = props.get("headline") or props.get("event")
         if headline:
             headlines.append(headline)
-    # de-dup keep order
     seen = set(); uniq = []
     for h in headlines:
         if h not in seen:
             uniq.append(h); seen.add(h)
     return uniq[:12]
 
-def summarize_region(name: str, j: dict) -> str:
+def format_line(name: str, j: dict) -> str:
+    """Compact, readable per-location line with graceful omissions."""
     try:
         hourly = j.get("hourly", {})
         daily = j.get("daily", {})
-        t = hourly.get("temperature_2m", [None])[0]
-        feels = hourly.get("apparent_temperature", [None])[0]
-        wind = hourly.get("wind_speed_10m", [None])[0]
-        gust = hourly.get("wind_gusts_10m", [None])[0]
-        pop = hourly.get("precipitation_probability", [None])[0]
-        precip_hr = hourly.get("precipitation", [None])[0]
-        tmax = daily.get("temperature_2m_max", [None])[0]
-        tmin = daily.get("temperature_2m_min", [None])[0]
-        precip_day = daily.get("precipitation_sum", [None])[0]
 
-        parts = [
-            f"**{name}**",
-            f"Now {fmt_temp(t)} (feels {fmt_temp(feels)})," if t is not None and feels is not None else None,
-            f"Wind {round(wind)} mph (gusts {round(gust)})," if wind is not None and gust is not None else None,
-            f"Chance precip {int(pop)}%," if pop is not None else None,
-            f"Last hr {float(precip_hr):.2f}\"" if precip_hr is not None else None,
-            f"Hi/Lo {fmt_temp(tmax)}/{fmt_temp(tmin)}" if tmax is not None and tmin is not None else None,
-            f"Today total {float(precip_day):.2f}\"" if precip_day is not None else None,
-        ]
-        text = " ".join(p for p in parts if p)
-        return text.replace(" ,", ",").rstrip(",")
+        t     = hourly.get("temperature_2m", [None])[0]
+        feels = hourly.get("apparent_temperature", [None])[0]
+        wind  = hourly.get("wind_speed_10m", [None])[0]
+        gust  = hourly.get("wind_gusts_10m", [None])[0]
+        pop   = hourly.get("precipitation_probability", [None])[0]
+        p1h   = hourly.get("precipitation", [None])[0]
+        tmax  = daily.get("temperature_2m_max", [None])[0]
+        tmin  = daily.get("temperature_2m_min", [None])[0]
+        pday  = daily.get("precipitation_sum", [None])[0]
+
+        bits = [f"• **{name}** —"]
+        if t is not None and feels is not None:
+            bits.append(f"🌡 {fmt_temp(t)} (feels {fmt_temp(feels)})")
+        if wind is not None and gust is not None:
+            bits.append(f"💨 {round(wind)} mph (G {round(gust)})")
+        if pop is not None:
+            bits.append(f"🌧 {int(pop)}%")
+        if p1h is not None:
+            bits.append(f"1h {float(p1h):.2f}\"")
+        if tmax is not None and tmin is not None:
+            # Keep Hi/Lo compact to reduce clutter
+            bits.append(f"⬆️ {fmt_temp(tmax)} ⬇️ {fmt_temp(tmin)}")
+        if pday is not None:
+            bits.append(f"Day {float(pday):.2f}\"")
+
+        return " | ".join(bits)
     except Exception:
-        return f"**{name}** — data unavailable"
+        return f"• **{name}** — data unavailable"
 
 async def build_bulletin_lines() -> List[str]:
     lines: List[str] = [f"📻 **UOC Weather Net — Utah** · {now_local()}"]
+
     async with aiohttp.ClientSession() as session:
+        # Alerts
         alerts = await fetch_ut_alerts(session)
         if alerts:
             lines += ["", "🚨 **Active Watches/Warnings (NWS)**"]
             lines += [f"• {h}" for h in alerts]
 
+        # Grouped regions
         lines += ["", "🗺️ **Regional Conditions**"]
-        for name, (lat, lon) in REGIONS.items():
-            try:
-                j = await fetch_open_meteo(session, lat, lon)
-                lines.append(f"• {summarize_region(name, j)}")
-                await asyncio.sleep(0.15)
-            except Exception as e:
-                lines.append(f"• **{name}** — error: {e}")
+        for header, names in GROUPS.items():
+            lines.append(f"\n__{header}__")
+            for name in names:
+                lat, lon = REGIONS[name]
+                try:
+                    data = await fetch_open_meteo(session, lat, lon)
+                    lines.append(format_line(name, data))
+                    await asyncio.sleep(0.12)
+                except Exception as e:
+                    lines.append(f"• **{name}** — error: {e}")
+
     return lines
 
 async def send_chunked(channel: discord.abc.Messageable, lines: List[str], hard_limit: int = 1900):
+    """Split across multiple messages to stay under 2000 chars."""
     buf = ""
     for line in lines:
         add = line + "\n"
@@ -201,7 +253,6 @@ async def post_weather():
         except Exception as e:
             print(f"[ERR] Channel fetch failed for {WEATHER_CHANNEL_ID}: {e}")
             return
-    print(f"[DBG] Loop resolved channel: {ch} (type: {ch.__class__.__name__})")
     try:
         lines = await build_bulletin_lines()
         await send_chunked(ch, lines)
@@ -216,16 +267,12 @@ async def post_weather():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID {bot.user.id})")
-    # Post once immediately so you don't wait
+    # Post once immediately on startup
     try:
         ch = bot.get_channel(WEATHER_CHANNEL_ID) or await bot.fetch_channel(WEATHER_CHANNEL_ID)
-        print(f"[DBG] Startup channel: {ch} (type: {ch.__class__.__name__})")
         lines = await build_bulletin_lines()
         await send_chunked(ch, lines)
         print("[OK] Initial weather bulletin posted.")
-    except discord.Forbidden:
-        print("[ERR] Forbidden on startup: bot lacks send/view in this channel.")
-        return
     except Exception as e:
         print(f"[ERR] Startup post failed: {e}")
         return
