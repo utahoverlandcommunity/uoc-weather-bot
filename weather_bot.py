@@ -1,4 +1,4 @@
-# weather_bot.py — UOC Weather Bot (grouped, readable format)
+# weather_bot.py — UOC Weather Bot (grouped, bold key numbers, 4-hr interval)
 import os
 import sys
 import asyncio
@@ -126,7 +126,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def fmt_temp(t) -> str:
+def temp_str(t) -> str:
     try:
         return f"{round(float(t))}°F"
     except Exception:
@@ -171,7 +171,7 @@ async def fetch_ut_alerts(session: aiohttp.ClientSession) -> List[str]:
     return uniq[:12]
 
 def format_line(name: str, j: dict) -> str:
-    """Compact, readable per-location line with graceful omissions."""
+    """Compact, readable per-location line; bold temps & steady wind."""
     try:
         hourly = j.get("hourly", {})
         daily = j.get("daily", {})
@@ -186,22 +186,22 @@ def format_line(name: str, j: dict) -> str:
         tmin  = daily.get("temperature_2m_min", [None])[0]
         pday  = daily.get("precipitation_sum", [None])[0]
 
-        bits = [f"• **{name}** —"]
+        parts: List[str] = []
         if t is not None and feels is not None:
-            bits.append(f"🌡 {fmt_temp(t)} (feels {fmt_temp(feels)})")
+            parts.append(f"🌡 **{temp_str(t)}** (feels {temp_str(feels)})")
         if wind is not None and gust is not None:
-            bits.append(f"💨 {round(wind)} mph (G {round(gust)})")
+            parts.append(f"💨 **{round(wind)} mph** (G {round(gust)})")
         if pop is not None:
-            bits.append(f"🌧 {int(pop)}%")
+            parts.append(f"🌧 {int(pop)}%")
         if p1h is not None:
-            bits.append(f"1h {float(p1h):.2f}\"")
+            parts.append(f"1h {float(p1h):.2f}\"")
         if tmax is not None and tmin is not None:
-            # Keep Hi/Lo compact to reduce clutter
-            bits.append(f"⬆️ {fmt_temp(tmax)} ⬇️ {fmt_temp(tmin)}")
+            parts.append(f"⬆️ **{temp_str(tmax)}** ⬇️ **{temp_str(tmin)}**")
         if pday is not None:
-            bits.append(f"Day {float(pday):.2f}\"")
+            parts.append(f"Day {float(pday):.2f}\"")
 
-        return " | ".join(bits)
+        # No extra pipe after the dash:
+        return f"• **{name}** — " + " | ".join(parts) if parts else f"• **{name}** — data unavailable"
     except Exception:
         return f"• **{name}** — data unavailable"
 
@@ -267,6 +267,7 @@ async def post_weather():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID {bot.user.id})")
+    print(f"[CFG] UPDATE_INTERVAL_MIN={UPDATE_INTERVAL_MIN} min  |  CHANNEL={WEATHER_CHANNEL_ID}")
     # Post once immediately on startup
     try:
         ch = bot.get_channel(WEATHER_CHANNEL_ID) or await bot.fetch_channel(WEATHER_CHANNEL_ID)
