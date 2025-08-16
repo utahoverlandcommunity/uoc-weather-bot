@@ -8,20 +8,18 @@ import aiohttp
 import discord
 from discord.ext import tasks, commands
 
-# ========= ENV VARS =========
+# ===== ENV =====
 TOKEN = os.getenv("DISCORD_TOKEN")
 WEATHER_CHANNEL_ID = int(os.getenv("WEATHER_CHANNEL_ID", "0"))
-# Every 4 hours by default
-UPDATE_INTERVAL_MIN = int(os.getenv("UPDATE_INTERVAL_MIN", "240"))
+UPDATE_INTERVAL_MIN = int(os.getenv("UPDATE_INTERVAL_MIN", "240"))  # 240 = 4 hours
 NWS_USER_AGENT = os.getenv("NWS_USER_AGENT", "UOC-WeatherBot (contact: admin@example.com)")
 
-if not TOKEN or len((TOKEN or "").split(".")) != 3:
-    sys.exit("FATAL: DISCORD_TOKEN missing or malformed (use the Bot Token).")
+if not TOKEN or len(TOKEN.split(".")) != 3:
+    sys.exit("FATAL: DISCORD_TOKEN missing/malformed.")
 if not WEATHER_CHANNEL_ID:
-    sys.exit("FATAL: Set WEATHER_CHANNEL_ID to your #utah-weather channel ID.")
+    sys.exit("FATAL: WEATHER_CHANNEL_ID not set.")
 
-# ========= REGIONS (lat, lon) =========
-# Big ol’ list across UT. Edit names or add more (lat, lon).
+# ===== REGIONS (lat, lon) =====
 REGIONS: Dict[str, Tuple[float, float]] = {
     # Wasatch Front & Canyons
     "Salt Lake City (Wasatch Front)": (40.7608, -111.8910),
@@ -85,12 +83,12 @@ REGIONS: Dict[str, Tuple[float, float]] = {
     "Caineville Factory Butte":       (38.3750, -110.8820),
 }
 
-# ========= DISCORD =========
+# ===== DISCORD =====
 intents = discord.Intents.default()
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def fmt_temp(t: float) -> str:
+def fmt_temp(t) -> str:
     try:
         return f"{round(float(t))}°F"
     except Exception:
@@ -128,7 +126,7 @@ async def fetch_ut_alerts(session: aiohttp.ClientSession) -> List[str]:
         headline = props.get("headline") or props.get("event")
         if headline:
             headlines.append(headline)
-    # de-duplicate preserving order
+    # de-dup keep order
     seen = set(); uniq = []
     for h in headlines:
         if h not in seen:
@@ -176,13 +174,12 @@ async def build_bulletin_lines() -> List[str]:
             try:
                 j = await fetch_open_meteo(session, lat, lon)
                 lines.append(f"• {summarize_region(name, j)}")
-                await asyncio.sleep(0.15)  # be kind to APIs
+                await asyncio.sleep(0.15)
             except Exception as e:
                 lines.append(f"• **{name}** — error: {e}")
     return lines
 
 async def send_chunked(channel: discord.abc.Messageable, lines: List[str], hard_limit: int = 1900):
-    """Send the bulletin split into multiple messages under the 2000-char limit."""
     buf = ""
     for line in lines:
         add = line + "\n"
@@ -202,17 +199,38 @@ async def post_weather():
         try:
             ch = await bot.fetch_channel(WEATHER_CHANNEL_ID)
         except Exception as e:
-            print("Channel fetch failed:", e); return
+            print(f"[ERR] Channel fetch failed for {WEATHER_CHANNEL_ID}: {e}")
+            return
+    print(f"[DBG] Loop resolved channel: {ch} (type: {ch.__class__.__name__})")
     try:
         lines = await build_bulletin_lines()
         await send_chunked(ch, lines)
-        print("Posted weather bulletin.")
+        print("[OK] Posted weather bulletin.")
+    except discord.Forbidden:
+        print("[ERR] Forbidden: missing send/view permission in channel.")
+    except discord.HTTPException as e:
+        print(f"[ERR] HTTPException while sending: {e}")
     except Exception as e:
-        print("Post failed:", e)
+        print(f"[ERR] Unexpected while sending: {e}")
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID {bot.user.id})")
+    # Post once immediately so you don't wait
+    try:
+        ch = bot.get_channel(WEATHER_CHANNEL_ID) or await bot.fetch_channel(WEATHER_CHANNEL_ID)
+        print(f"[DBG] Startup channel: {ch} (type: {ch.__class__.__name__})")
+        await ch.send("🔧 Weather bot online. Posting initial bulletin…")
+        lines = await build_bulletin_lines()
+        await send_chunked(ch, lines)
+        print("[OK] Initial weather bulletin posted.")
+    except discord.Forbidden:
+        print("[ERR] Forbidden on startup: bot lacks send/view in this channel.")
+        return
+    except Exception as e:
+        print(f"[ERR] Startup post failed: {e}")
+        return
+
     if not post_weather.is_running():
         await asyncio.sleep(5)
         post_weather.start()
